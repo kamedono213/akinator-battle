@@ -8,10 +8,10 @@
 // この設定を隠すことではなく、Firestoreセキュリティルール側で保護します。
 // ../firestore.rules を参照)。
 export const firebaseConfig = {
-  apiKey: 'REPLACE_ME',
-  authDomain: 'REPLACE_ME.firebaseapp.com',
-  projectId: 'REPLACE_ME',
-  storageBucket: 'REPLACE_ME.firebasestorage.app',
-  messagingSenderId: 'REPLACE_ME',
-  appId: 'REPLACE_ME',
+  apiKey: 'AIzaSyCt4VvsrO13i95Ady3Y-QxB9ZM05no-XoM',
+  authDomain: 'akinator-battle.firebaseapp.com',
+  projectId: 'akinator-battle',
+  storageBucket: 'akinator-battle.firebasestorage.app',
+  messagingSenderId: '622609439560',
+  appId: '1:622609439560:web:4c56bf0413aaae9e80317d',
 };
