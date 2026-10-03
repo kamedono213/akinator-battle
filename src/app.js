@@ -2,6 +2,8 @@ import {
   createRoom, joinRoom, subscribeToRoom, startPlaying,
   submitPending, answerQuestion, judgeEarlyGuess,
   submitFinalGuess, judgeFinalGuess, startNextRound,
+  submitExtensionChoice, finalizeGiveUp,
+  requestEndGame, cancelEndRequest, approveEndGame, finalizeAbortedByHost,
   getClientId, MAX_TURNS,
 } from './room.js';
 import { listGames, getGame, putGame, deleteGame } from './db.js';
@@ -22,9 +24,13 @@ const state = {
   room: null,
   unsubscribe: null,
   topicLocal: '', // ホストだけが保持する、このラウンドのお題(Firestoreには最後まで書かない)
+  topicStep: 'topic', // host_setting_topic中のホスト側ローカル手順: 'topic' → 'hint'
+  genreHintLocal: '',
   dataGames: [],
   expandedGameId: null,
   savedEndedKey: null, // 同じ終了を二重に履歴保存しないためのガード
+  handledGiveUpKey: null, // give_up確定処理の二重実行防止ガード(ホスト側)
+  handledAbortKey: null, // 途中終了確定処理の二重実行防止ガード(ホスト側)
 };
 
 function myRole(room) {
@@ -84,6 +90,7 @@ function renderBattleTab() {
     case 'host_setting_topic': return renderSettingTopic(room);
     case 'playing':
     case 'final_guess': return renderPlaying(room);
+    case 'extension_offer': return renderExtensionOffer(room);
     case 'ended': return renderEnded(room);
     default: return renderHomeScreen();
   }
@@ -157,9 +164,34 @@ function enterRoom(code) {
       saveCompletedGameLocally(room);
     }
     if (room.phase === 'host_setting_topic' && myRole(room) !== 'host') state.topicLocal = '';
+    if (prevPhase !== room.phase && room.phase === 'host_setting_topic') {
+      state.topicStep = 'topic';
+      state.genreHintLocal = '';
+    }
+    handleHostReactiveFinalize(room);
     render();
   });
   render();
+}
+
+// お題を知っているのはホストの端末だけなので、「諦めた」「途中終了が承認された」
+// といった、本来お題を公開して終わらせるべきタイミングは、ホスト側のこの関数が
+// スナップショット更新のたびにチェックして確定させる(ゲスト側は見ているだけ)。
+// 同じ確定処理を二重に送ってしまわないよう、処理済みのキーを覚えておく。
+async function handleHostReactiveFinalize(room) {
+  if (myRole(room) !== 'host') return;
+  if (room.phase === 'extension_offer' && room.extensionChoice === 'give_up') {
+    const key = `giveup:${room.code}:${room.turnsUsed}`;
+    if (state.handledGiveUpKey === key) return;
+    state.handledGiveUpKey = key;
+    await finalizeGiveUp(room.code, state.topicLocal);
+  }
+  if (room.endRequest?.approved && room.phase !== 'ended') {
+    const key = `abort:${room.code}:${room.log?.length || 0}`;
+    if (state.handledAbortKey === key) return;
+    state.handledAbortKey = key;
+    await finalizeAbortedByHost(room.code, state.topicLocal);
+  }
 }
 
 function leaveRoom() {
@@ -170,6 +202,49 @@ function leaveRoom() {
   state.topicLocal = '';
   clearActiveRoom();
   render();
+}
+
+// ------------------------------------------------------------------
+// 途中終了(どちらかが押す→もう一方が承認する)の共通UI。
+// お題を決めたあとのフェーズ(host_setting_topic以降)で常に使えるようにする。
+// ------------------------------------------------------------------
+function roundTopbarHtml(room) {
+  return `
+    <div class="round-topbar">
+      <span class="round-topbar-code">部屋 ${room.code}</span>
+      <button id="endGameBtn" class="end-game-btn" type="button" title="このラウンドを途中で終了する">✕ 終了</button>
+    </div>
+    <div id="endRequestBanner"></div>`;
+}
+
+function wireRoundTopbar(room) {
+  const role = myRole(room);
+  $('endGameBtn')?.addEventListener('click', async () => {
+    if (!confirm('このラウンドを途中で終了しますか？相手に確認が送られます。')) return;
+    await requestEndGame(room.code, role);
+  });
+
+  const banner = $('endRequestBanner');
+  if (!banner || !room.endRequest) return;
+  if (room.endRequest.by === role) {
+    banner.innerHTML = `
+      <div class="end-request-banner">
+        <p>相手の返事を待っています…</p>
+        <button id="cancelEndBtn" class="secondary-btn" type="button">取り消す</button>
+      </div>`;
+    $('cancelEndBtn').addEventListener('click', () => cancelEndRequest(room.code));
+  } else if (!room.endRequest.approved) {
+    banner.innerHTML = `
+      <div class="end-request-banner is-incoming">
+        <p>相手がこのラウンドを終了したがっています</p>
+        <div class="end-request-buttons">
+          <button id="approveEndBtn" class="primary-btn" type="button">終了する</button>
+          <button id="declineEndBtn" class="secondary-btn" type="button">続ける</button>
+        </div>
+      </div>`;
+    $('approveEndBtn').addEventListener('click', () => approveEndGame(room.code, role, state.topicLocal));
+    $('declineEndBtn').addEventListener('click', () => cancelEndRequest(room.code));
+  }
 }
 
 function renderWaitingGuest(room) {
@@ -189,29 +264,58 @@ function renderWaitingGuest(room) {
 
 function renderSettingTopic(room) {
   const role = myRole(room);
-  if (role === 'host') {
+  if (role !== 'host') {
     app.innerHTML = `
-      <section class="topic-view">
-        <div class="code-card small"><p class="field-label">部屋コード ${room.code}</p></div>
-        <h2>お題を決めてください</h2>
-        <p class="hint-text">相手には見えません。人・モノ・キャラクターなど、何でもOK。</p>
-        <textarea id="topicInput" class="topic-input" placeholder="例: ドラえもん">${escapeHtml(state.topicLocal)}</textarea>
-        <button id="confirmTopicBtn" class="primary-btn" type="button">これで決定</button>
-      </section>`;
-    const textarea = $('topicInput');
-    textarea.addEventListener('input', () => { state.topicLocal = textarea.value; });
-    $('confirmTopicBtn').addEventListener('click', async () => {
-      const topic = state.topicLocal.trim();
-      if (!topic) { showToast('お題を入力してください'); return; }
-      saveLocalTopic(room.code, topic);
-      await startPlaying(room.code);
-    });
-  } else {
-    app.innerHTML = `
+      ${roundTopbarHtml(room)}
       <section class="waiting-view">
         <p class="status-text">親がお題を考えています…</p>
       </section>`;
+    wireRoundTopbar(room);
+    return;
   }
+
+  if (state.topicStep === 'hint') {
+    app.innerHTML = `
+      ${roundTopbarHtml(room)}
+      <section class="topic-view">
+        <h2>ジャンルを教える？</h2>
+        <p class="hint-text">難易度を下げたい時に。空欄のまま「教えない」を押せばヒントなしで始まります。</p>
+        <textarea id="genreHintInput" class="topic-input" placeholder="例: アニメキャラクター">${escapeHtml(state.genreHintLocal)}</textarea>
+        <button id="startWithHintBtn" class="primary-btn" type="button">これを教えてスタート</button>
+        <button id="startNoHintBtn" class="secondary-btn" type="button">教えない</button>
+      </section>`;
+    wireRoundTopbar(room);
+    const textarea = $('genreHintInput');
+    textarea.addEventListener('input', () => { state.genreHintLocal = textarea.value; });
+    $('startWithHintBtn').addEventListener('click', async () => {
+      const hint = state.genreHintLocal.trim();
+      if (!hint) { showToast('ジャンルを入力するか、「教えない」を押してください'); return; }
+      await startPlaying(room.code, hint);
+    });
+    $('startNoHintBtn').addEventListener('click', async () => {
+      await startPlaying(room.code, null);
+    });
+    return;
+  }
+
+  app.innerHTML = `
+    ${roundTopbarHtml(room)}
+    <section class="topic-view">
+      <h2>お題を決めてください</h2>
+      <p class="hint-text">相手には見えません。人・モノ・キャラクターなど、何でもOK。</p>
+      <textarea id="topicInput" class="topic-input" placeholder="例: ドラえもん">${escapeHtml(state.topicLocal)}</textarea>
+      <button id="confirmTopicBtn" class="primary-btn" type="button">これで決定</button>
+    </section>`;
+  wireRoundTopbar(room);
+  const textarea = $('topicInput');
+  textarea.addEventListener('input', () => { state.topicLocal = textarea.value; });
+  $('confirmTopicBtn').addEventListener('click', () => {
+    const topic = state.topicLocal.trim();
+    if (!topic) { showToast('お題を入力してください'); return; }
+    saveLocalTopic(room.code, topic);
+    state.topicStep = 'hint';
+    render();
+  });
 }
 
 function logEntryLine(entry) {
@@ -232,18 +336,23 @@ function logEntryLine(entry) {
 
 function renderPlaying(room) {
   const role = myRole(room);
-  const remaining = (room.maxTurns || MAX_TURNS) - (room.turnsUsed || 0);
+  const isInfinite = room.maxTurns == null;
+  const remaining = isInfinite ? null : room.maxTurns - (room.turnsUsed || 0);
   const logHtml = (room.log || []).map(logEntryLine).join('') || '<p class="hint-text">まだ質問がありません</p>';
+  const turnsLabel = room.phase === 'final_guess' ? '最終回答フェーズ' : (isInfinite ? '質問は無制限' : `残り質問 ${remaining} / ${room.maxTurns}`);
 
   app.innerHTML = `
+    ${roundTopbarHtml(room)}
     <section class="play-view">
+      ${room.genreHint ? `<div class="genre-hint-banner">🔎 ジャンル: ${escapeHtml(room.genreHint)}</div>` : ''}
       <div class="play-head">
         <span class="role-badge">${role === 'host' ? '親' : '子'}</span>
-        <span class="turns-left">${room.phase === 'final_guess' ? '最終回答フェーズ' : `残り質問 ${remaining} / ${room.maxTurns || MAX_TURNS}`}</span>
+        <span class="turns-left">${turnsLabel}</span>
       </div>
       <div id="logArea" class="log-area">${logHtml}</div>
       <div id="actionArea" class="action-area"></div>
     </section>`;
+  wireRoundTopbar(room);
 
   const logArea = $('logArea');
   logArea.scrollTop = logArea.scrollHeight;
@@ -277,6 +386,24 @@ function renderPendingForHost(actionArea, room, role) {
         actionArea.querySelectorAll('button').forEach((b) => (b.disabled = true));
         await answerQuestion(room.code, p, btn.dataset.answer);
       });
+    });
+  } else if (p.type === 'final_guess') {
+    // 質問権を使い切ったあとの、強制の最終回答の正誤判定
+    actionArea.innerHTML = `
+      <div class="pending-card">
+        <p class="pending-label">相手の最終回答: ${escapeHtml(p.text)}</p>
+        <div class="judge-grid">
+          <button id="judgeCorrectBtn" class="answer-btn ans-correct" type="button">正解</button>
+          <button id="judgeIncorrectBtn" class="answer-btn ans-incorrect" type="button">ハズレ</button>
+        </div>
+      </div>`;
+    $('judgeCorrectBtn').addEventListener('click', async () => {
+      actionArea.querySelectorAll('button').forEach((b) => (b.disabled = true));
+      await judgeFinalGuess(room.code, p, true, state.topicLocal);
+    });
+    $('judgeIncorrectBtn').addEventListener('click', async () => {
+      actionArea.querySelectorAll('button').forEach((b) => (b.disabled = true));
+      await judgeFinalGuess(room.code, p, false, null);
     });
   } else {
     // 質問権を消費した途中回答(type: 'guess')の正誤判定
@@ -315,12 +442,13 @@ function renderGuestInput(actionArea, room) {
     });
     return;
   }
+  const isInfinite = room.maxTurns == null;
   actionArea.innerHTML = `
     <div class="question-input-card">
       <textarea id="questionInput" class="question-input" placeholder="はい/いいえで答えられる質問を書いてください"></textarea>
       <div class="question-buttons">
         <button id="sendQuestionBtn" class="primary-btn" type="button">質問する</button>
-        <button id="useGuessBtn" class="secondary-btn" type="button">質問権を使って回答する</button>
+        <button id="useGuessBtn" class="secondary-btn" type="button">${isInfinite ? '回答する' : '質問権を使って回答する'}</button>
       </div>
     </div>`;
   $('sendQuestionBtn').addEventListener('click', async () => {
@@ -330,21 +458,63 @@ function renderGuestInput(actionArea, room) {
     await submitPending(room.code, 'question', text, room.turnsUsed || 0);
   });
   $('useGuessBtn').addEventListener('click', async () => {
-    const text = prompt('質問権を1つ使って回答します。回答内容を入力してください');
+    const text = prompt(isInfinite ? '回答内容を入力してください' : '質問権を1つ使って回答します。回答内容を入力してください');
     if (!text || !text.trim()) return;
     await submitPending(room.code, 'guess', text.trim(), room.turnsUsed || 0);
+  });
+}
+
+function renderExtensionOffer(room) {
+  const role = myRole(room);
+  const logHtml = (room.log || []).map(logEntryLine).join('');
+  app.innerHTML = `
+    ${roundTopbarHtml(room)}
+    <section class="play-view">
+      <div class="log-area">${logHtml}</div>
+      <div id="actionArea" class="action-area"></div>
+    </section>`;
+  wireRoundTopbar(room);
+
+  const actionArea = $('actionArea');
+  if (role !== 'guest') {
+    actionArea.innerHTML = `<p class="hint-text">相手が続けるかどうかを選んでいます…</p>`;
+    return;
+  }
+  actionArea.innerHTML = `
+    <div class="pending-card">
+      <p class="pending-label">残念、ハズレでした。追加の質問権をもらいますか？</p>
+      <div class="extension-row">
+        <select id="extensionSelect">
+          ${Array.from({ length: 10 }, (_, i) => i + 1).map((n) => `<option value="${n}">${n}問</option>`).join('')}
+          <option value="infinite">∞(無制限)</option>
+        </select>
+        <button id="extensionContinueBtn" class="primary-btn" type="button">これで続ける</button>
+      </div>
+      <button id="extensionGiveUpBtn" class="secondary-btn" type="button">諦める</button>
+    </div>`;
+  $('extensionContinueBtn').addEventListener('click', async () => {
+    const value = $('extensionSelect').value;
+    await submitExtensionChoice(room.code, value);
+  });
+  $('extensionGiveUpBtn').addEventListener('click', async () => {
+    if (!confirm('諦めますか？お題が公開されて対戦が終了します。')) return;
+    await submitExtensionChoice(room.code, 'give_up');
   });
 }
 
 function renderEnded(room) {
   const role = myRole(room);
   const isCorrect = room.result === 'correct';
+  const isAborted = room.result === 'aborted';
+  const resultClass = isAborted ? 'is-aborted' : (isCorrect ? 'is-correct' : 'is-incorrect');
+  const resultMark = isAborted ? '🚪' : (isCorrect ? '🎉' : '😵');
+  const resultTitle = isAborted ? '途中終了' : (isCorrect ? '正解！' : '不正解…');
   const logHtml = (room.log || []).map(logEntryLine).join('');
   app.innerHTML = `
     <section class="ended-view">
-      <div class="result-card ${isCorrect ? 'is-correct' : 'is-incorrect'}">
-        <div class="result-mark">${isCorrect ? '🎉' : '😵'}</div>
-        <h1>${isCorrect ? '正解！' : '不正解…'}</h1>
+      <div class="result-card ${resultClass}">
+        <div class="result-mark">${resultMark}</div>
+        <h1>${resultTitle}</h1>
         <p class="topic-reveal">お題は「${escapeHtml(room.topic || '')}」でした</p>
       </div>
       <div class="log-area">${logHtml}</div>
@@ -422,10 +592,10 @@ async function renderDataTab() {
   for (const game of games) {
     const row = document.createElement('div');
     row.className = 'game-row';
-    const isCorrect = game.result === 'correct';
+    const dotClass = game.result === 'aborted' ? 'is-aborted' : (game.result === 'correct' ? 'is-correct' : 'is-incorrect');
     row.innerHTML = `
       <button class="game-row-head" type="button">
-        <span class="game-result-dot ${isCorrect ? 'is-correct' : 'is-incorrect'}"></span>
+        <span class="game-result-dot ${dotClass}"></span>
         <span class="game-topic">${escapeHtml(game.topic || '(無題)')}</span>
         <span class="game-role">${game.role === 'host' ? '親' : '子'}</span>
         <span class="game-date">${formatDate(game.endedAt)}</span>
@@ -461,6 +631,10 @@ function escapeHtml(value) {
 // ------------------------------------------------------------------
 // 起動
 // ------------------------------------------------------------------
+window.__TEST_state = state;
+window.__TEST_startPlaying = startPlaying;
+window.__TEST_render = render;
+
 async function init() {
   for (const btn of bottomTabbar.querySelectorAll('button')) {
     btn.addEventListener('click', () => switchTab(btn.dataset.tab));
