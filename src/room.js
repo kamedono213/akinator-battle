@@ -16,7 +16,6 @@ const {
   initializeFirestore,
   doc,
   getDoc,
-  setDoc,
   updateDoc,
   onSnapshot,
   serverTimestamp,
@@ -54,10 +53,12 @@ function freshRoundFields() {
     pending: null,
     finalGuessText: null,
     topic: null,
+    genreHint: null,
     result: null,
+    extensionChoice: null,
+    endRequest: null,
     startedAt: serverTimestamp(),
     endedAt: null,
-    swapChoice: null,
   };
 }
 
@@ -118,8 +119,10 @@ export async function getRoomOnce(code) {
 // ホストがお題の入力を終えて対戦を開始する。お題そのものはFirestoreに書かず
 // (ゲストに覗き見られないよう)ホストの端末だけで保持し、最後の正誤判定の
 // タイミングで初めてtopicフィールドに書き込んで公開する。
-export async function startPlaying(code) {
-  await updateDoc(doc(dbFs, ROOMS, code), { phase: 'playing' });
+// ジャンルヒントは「教える」を選んだ場合のみここで一緒に公開する(お題本体とは
+// 違い、公開しても一発でバレる情報ではないため、開始と同時に渡して問題ない)。
+export async function startPlaying(code, genreHint) {
+  await updateDoc(doc(dbFs, ROOMS, code), { phase: 'playing', genreHint: genreHint || null });
 }
 
 // ゲストが質問、または質問権を消費しての途中回答を送信する。
@@ -127,6 +130,12 @@ export async function submitPending(code, type, text, turnsUsed) {
   await updateDoc(doc(dbFs, ROOMS, code), {
     pending: { type, text, n: turnsUsed + 1 },
   });
+}
+
+function nextPhaseAfterTurn(data, turnsUsed) {
+  // maxTurnsがnull(∞延長中)の場合は上限なし。それ以外は上限に達したら最終回答へ。
+  if (data.maxTurns == null) return 'playing';
+  return turnsUsed >= data.maxTurns ? 'final_guess' : 'playing';
 }
 
 // ホストが質問に5択で回答する。ログに積み、質問権を1つ消費する。
@@ -138,8 +147,7 @@ export async function answerQuestion(code, pendingEntry, answer) {
     const data = snap.data();
     const turnsUsed = (data.turnsUsed || 0) + 1;
     const log = [...(data.log || []), { ...pendingEntry, answer }];
-    const nextPhase = turnsUsed >= (data.maxTurns || MAX_TURNS) ? 'final_guess' : 'playing';
-    tx.update(ref, { log, pending: null, turnsUsed, phase: nextPhase });
+    tx.update(ref, { log, pending: null, turnsUsed, phase: nextPhaseAfterTurn(data, turnsUsed) });
   });
 }
 
@@ -158,8 +166,7 @@ export async function judgeEarlyGuess(code, pendingEntry, correct, topicIfEnding
         phase: 'ended', result: 'correct', topic: topicIfEnding, endedAt: serverTimestamp(),
       });
     } else {
-      const nextPhase = turnsUsed >= (data.maxTurns || MAX_TURNS) ? 'final_guess' : 'playing';
-      tx.update(ref, { log, pending: null, turnsUsed, phase: nextPhase });
+      tx.update(ref, { log, pending: null, turnsUsed, phase: nextPhaseAfterTurn(data, turnsUsed) });
     }
   });
 }
@@ -171,14 +178,76 @@ export async function submitFinalGuess(code, text) {
   });
 }
 
+// 最終回答の正誤判定。正解ならそのまま終了。不正解の場合はまだ終わらせず、
+// 「追加の質問権をもらうか、諦めるか」を子に選んでもらうフェーズへ進む
+// (お題はまだ公開しない。諦めるを選んだ時に初めて公開する)。
 export async function judgeFinalGuess(code, pendingEntry, correct, topic) {
+  const ref = doc(dbFs, ROOMS, code);
+  await runTransaction(dbFs, async (tx) => {
+    const snap = await tx.get(ref);
+    const data = snap.data();
+    const log = [...(data.log || []), { ...pendingEntry, correct }];
+    if (correct) {
+      tx.update(ref, {
+        log, pending: null, finalGuessText: pendingEntry.text,
+        phase: 'ended', result: 'correct', topic, endedAt: serverTimestamp(),
+      });
+    } else {
+      tx.update(ref, {
+        log, pending: null, finalGuessText: pendingEntry.text, phase: 'extension_offer',
+      });
+    }
+  });
+}
+
+// 子が延長オファーに応答する。choiceは 1〜10 の数値 / 'infinite' / 'give_up'。
+// 数値・無限の場合はそのままゲーム再開(お題はまだ秘密のまま)。
+// 諦める場合は、お題を知っているホスト側が後からfinalizeGiveUp()で確定させる
+// 必要があるため、ここでは意思表示だけ書き込む。
+export async function submitExtensionChoice(code, choice) {
+  if (choice === 'give_up') {
+    await updateDoc(doc(dbFs, ROOMS, code), { extensionChoice: 'give_up' });
+    return;
+  }
+  const maxTurns = choice === 'infinite' ? null : Number(choice);
   await updateDoc(doc(dbFs, ROOMS, code), {
-    pending: null,
-    finalGuessText: pendingEntry.text,
-    phase: 'ended',
-    result: correct ? 'correct' : 'incorrect',
-    topic,
-    endedAt: serverTimestamp(),
+    extensionChoice: null, turnsUsed: 0, maxTurns, phase: 'playing',
+  });
+}
+
+// ホストだけが呼べる: 子が「諦める」を選んだのを受けて、お題を公開して終了する。
+export async function finalizeGiveUp(code, topic) {
+  await updateDoc(doc(dbFs, ROOMS, code), {
+    extensionChoice: null, phase: 'ended', result: 'incorrect', topic, endedAt: serverTimestamp(),
+  });
+}
+
+// 途中終了(どちらかが「終了」を押し、もう一方が承認する)。
+export async function requestEndGame(code, by) {
+  await updateDoc(doc(dbFs, ROOMS, code), { endRequest: { by, approved: false } });
+}
+
+export async function cancelEndRequest(code) {
+  await updateDoc(doc(dbFs, ROOMS, code), { endRequest: null });
+}
+
+// 承認した本人がホストなら、お題を知っているのでその場で確定させる。
+// 承認した本人がゲストの場合は、お題を知らないためapprovedフラグだけ立てて
+// ホスト側のfinalizeAbortedByHost()に確定を任せる。
+export async function approveEndGame(code, respondentRole, topicIfHost) {
+  if (respondentRole === 'host') {
+    await updateDoc(doc(dbFs, ROOMS, code), {
+      endRequest: null, phase: 'ended', result: 'aborted', topic: topicIfHost, endedAt: serverTimestamp(),
+    });
+  } else {
+    await updateDoc(doc(dbFs, ROOMS, code), { 'endRequest.approved': true });
+  }
+}
+
+// ホストだけが呼べる: ゲストが途中終了を承認したのを受けて、お題を公開して終了する。
+export async function finalizeAbortedByHost(code, topic) {
+  await updateDoc(doc(dbFs, ROOMS, code), {
+    endRequest: null, phase: 'ended', result: 'aborted', topic, endedAt: serverTimestamp(),
   });
 }
 

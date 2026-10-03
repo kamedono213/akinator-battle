@@ -97,9 +97,38 @@ textarea { font: inherit; }
 .judge-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .question-buttons { display: flex; flex-direction: column; gap: 8px; }
 
+.round-topbar {
+  display: flex; justify-content: space-between; align-items: center; margin: 0 0 10px;
+}
+.round-topbar-code { font-size: .78rem; font-weight: 800; color: var(--muted); }
+.end-game-btn {
+  border: 1px solid var(--line); background: var(--surface); color: var(--incorrect);
+  font-weight: 800; font-size: .76rem; padding: 6px 12px; border-radius: 999px;
+}
+.end-request-banner {
+  background: var(--surface); border: 1px solid var(--incorrect); border-radius: 12px; padding: 12px 14px;
+  margin-bottom: 12px; text-align: center;
+}
+.end-request-banner p { margin: 0 0 10px; font-weight: 700; font-size: .9rem; }
+.end-request-banner.is-incoming { border-color: var(--warm, var(--accent-2)); }
+.end-request-buttons { display: flex; gap: 8px; }
+
+.genre-hint-banner {
+  background: var(--surface-2); border: 1px dashed var(--line); border-radius: 10px; padding: 8px 12px;
+  font-size: .84rem; font-weight: 700; margin-bottom: 10px; text-align: center;
+}
+
+.extension-row { display: flex; gap: 8px; margin-bottom: 10px; }
+.extension-row select {
+  flex: 1; min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--surface-2); color: var(--text); font-size: 1rem;
+}
+.extension-row .primary-btn { width: auto; flex: 0 0 auto; padding: 0 16px; }
+
 .ended-view { text-align: center; }
 .result-card.is-correct { border-color: var(--correct); }
 .result-card.is-incorrect { border-color: var(--incorrect); }
+.result-card.is-aborted { border-color: var(--muted); }
 .result-mark { font-size: 3rem; }
 .result-card h1 { margin: 4px 0; }
 .topic-reveal { font-weight: 800; font-size: 1.05rem; }
@@ -118,6 +147,7 @@ textarea { font: inherit; }
 .game-result-dot { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
 .game-result-dot.is-correct { background: var(--correct); }
 .game-result-dot.is-incorrect { background: var(--incorrect); }
+.game-result-dot.is-aborted { background: var(--muted); }
 .game-topic { flex: 1; min-width: 0; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .game-role { font-size: .72rem; color: var(--muted); flex: 0 0 auto; }
 .game-date { font-size: .72rem; color: var(--muted); flex: 0 0 auto; }
