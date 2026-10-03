@@ -1,0 +1,25 @@
+rules_version = '2';
+
+// ログイン機能を持たないアプリのため、認証(request.auth)によるアクセス制御は
+// 使えない。代わりに「4桁の部屋コードを知っている人だけがその部屋にアクセス
+// できる」という、部屋コード自体を合言葉がわりにした設計にしている。
+// 友人同士がその場でコードを伝え合って遊ぶ想定のカジュアルゲームなので
+// この強度で割り切っているが、他人に知られて困るような情報は決して
+// roomsコレクションに書き込まないこと(お題はクライアント側でのみ保持し、
+// 対戦終了時に初めてtopicフィールドへ書き込む設計はこの理由による)。
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /rooms/{code} {
+      allow read: if true;
+      allow create: if code is string
+        && code.size() == 4
+        && request.resource.data.code == code
+        && request.resource.data.hostId is string;
+      allow update: if resource.data.code == code;
+      allow delete: if false;
+    }
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
