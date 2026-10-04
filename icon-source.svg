@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="35%" r="75%">
+      <stop offset="0%" stop-color="#3f8f8f"/>
+      <stop offset="100%" stop-color="#1f4f4f"/>
+    </radialGradient>
+    <linearGradient id="gold" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffe9b0"/>
+      <stop offset="55%" stop-color="#f0b84a"/>
+      <stop offset="100%" stop-color="#c8822a"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="104" fill="url(#bg)"/>
+
+  <!-- smoke wisp -->
+  <path d="M250 190 C 220 150, 260 110, 230 70 C 270 90, 300 60, 290 20"
+        fill="none" stroke="#f4f1ea" stroke-width="12" stroke-linecap="round" opacity="0.75"/>
+  <circle cx="292" cy="16" r="10" fill="#f4f1ea" opacity="0.8"/>
+
+  <!-- lamp body -->
+  <path d="M120 330
+           C 120 300 150 280 185 280
+           L 230 280
+           C 220 255 240 235 268 240
+           C 300 246 305 270 292 290
+           L 330 300
+           C 390 310 400 360 350 378
+           C 300 396 170 396 130 378
+           C 95 362 95 336 120 330 Z"
+        fill="url(#gold)" stroke="#8a5a1c" stroke-width="5"/>
+
+  <!-- spout -->
+  <path d="M330 300 C 370 296 400 282 420 258"
+        fill="none" stroke="url(#gold)" stroke-width="22" stroke-linecap="round"/>
+  <path d="M330 300 C 370 296 400 282 420 258"
+        fill="none" stroke="#8a5a1c" stroke-width="5" stroke-linecap="round" opacity="0.5"/>
+
+  <!-- base -->
+  <ellipse cx="225" cy="392" rx="120" ry="16" fill="#8a5a1c" opacity="0.55"/>
+
+  <!-- shine -->
+  <ellipse cx="180" cy="320" rx="26" ry="14" fill="#fff6df" opacity="0.65" transform="rotate(-18 180 320)"/>
+</svg>
