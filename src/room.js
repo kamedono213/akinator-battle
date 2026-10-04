@@ -20,6 +20,7 @@ const {
   onSnapshot,
   serverTimestamp,
   runTransaction,
+  arrayUnion,
 } = firestoreSdk;
 
 const app = initializeApp(firebaseConfig);
@@ -57,9 +58,18 @@ function freshRoundFields() {
     result: null,
     extensionChoice: null,
     endRequest: null,
+    chat: [],
     startedAt: serverTimestamp(),
     endedAt: null,
   };
+}
+
+// バトル中にチャットできる自由会話欄。質問ログ(log)とは別枠で、ラウンドが
+// 変わる(startNextRound)たびにリセットされる。
+export async function sendChatMessage(code, from, text) {
+  await updateDoc(doc(dbFs, ROOMS, code), {
+    chat: arrayUnion({ from, text, ts: Date.now() }),
+  });
 }
 
 // 4桁コードの衝突を避けるため、空いているコードが見つかるまで作成を試みる。
