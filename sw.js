@@ -1,4 +1,4 @@
-const CACHE_NAME = 'akinator-battle-v3';
+const CACHE_NAME = 'akinator-battle-v4';
 const APP_SHELL = [
   './',
   './index.html',
