@@ -19,7 +19,7 @@ const ANSWER_CLASS = {
   '部分的にはい': 'ans-partial-yes', '部分的にいいえ': 'ans-partial-no',
 };
 const EMOTE_OPTIONS = ['😂', '😮', '👍', '😢', '🔥', '❤️'];
-const CLICKER_STORE_KEY = 'akinator-battle:clickerCount';
+const CLICKER_STORE_KEY = 'akinator-battle:clickerState';
 
 const state = {
   tab: 'battle',
@@ -35,7 +35,7 @@ const state = {
   handledGiveUpKey: null, // give_up確定処理の二重実行防止ガード(ホスト側)
   handledAbortKey: null, // 途中終了確定処理の二重実行防止ガード(ホスト側)
   lastSeenEmoteTs: 0, // ここまで再生済みのエモートのts(自分のエコー/入室前の古いエモートを再生しないためのガード)
-  clickerCount: 0, // 待ち時間ミニゲーム(占い玉タップ)。端末ローカルのみ、対戦相手とは同期しない
+  clicker: { cookies: 0, clickPower: 1, owned: {}, upgrades: {} }, // 待ち時間ミニゲーム。端末ローカルのみ、対戦相手とは同期しない
 };
 
 function myRole(room) {
@@ -304,19 +304,141 @@ function spawnFloatingEmote(emoji) {
 // ------------------------------------------------------------------
 // 待ち時間の暇つぶしミニゲーム(占い玉タップ)。チャット欄の上、質問回答欄の
 // 下の空間に常駐。対戦には一切影響しない、端末ローカルだけのおまけ。
+// クッキー・クリッカーと同じ構造: タップで玉を集める→自動収集施設(CpSに
+// 相当)を雇って放置収入を得る→タップ自体を強化する、の2方向で育てる。
+// 施設は「ショップ」ボタンを押した時だけ、同じ固定エリアの上に小さな
+// パネルとして展開する(画面遷移はしない)。
 // ------------------------------------------------------------------
-function loadClickerCount() {
-  try { return Number(localStorage.getItem(CLICKER_STORE_KEY)) || 0; } catch (_) { return 0; }
+const CLICKER_GENERATORS = [
+  { key: 'g1', name: '見習い占い師', icon: '🧙', desc: '少しずつ占い玉を集めてくれる', baseCost: 15, cps: 0.1 },
+  { key: 'g2', name: '水晶玉職人', icon: '🔨', desc: '質のいい水晶玉を安定して作る', baseCost: 100, cps: 1 },
+  { key: 'g3', name: '占いの館', icon: '🏛️', desc: '専属の占い師を何人も抱える館', baseCost: 1100, cps: 8 },
+  { key: 'g4', name: '星見の塔', icon: '🗼', desc: '星の動きから自動で玉を読み取る塔', baseCost: 12000, cps: 47 },
+];
+const CLICKER_UPGRADES = [
+  { key: 'u1', name: 'するどい直感', icon: '✨', desc: 'タップ1回の獲得量が増える', cost: 500, power: 1 },
+  { key: 'u2', name: '千里眼', icon: '🔭', desc: 'タップ1回の獲得量がさらに増える', cost: 5000, power: 3 },
+];
+
+function loadClickerState() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(CLICKER_STORE_KEY) || 'null');
+    if (raw && typeof raw === 'object') {
+      return { cookies: raw.cookies || 0, clickPower: raw.clickPower || 1, owned: raw.owned || {}, upgrades: raw.upgrades || {} };
+    }
+  } catch (_) {}
+  return { cookies: 0, clickPower: 1, owned: {}, upgrades: {} };
 }
-function saveClickerCount(n) {
-  try { localStorage.setItem(CLICKER_STORE_KEY, String(n)); } catch (_) {}
+function saveClickerState() {
+  try { localStorage.setItem(CLICKER_STORE_KEY, JSON.stringify(state.clicker)); } catch (_) {}
+}
+function clickerCost(gen, owned) {
+  return Math.round(gen.baseCost * Math.pow(1.15, owned));
+}
+function clickerTotalCps() {
+  return CLICKER_GENERATORS.reduce((sum, g) => sum + g.cps * (state.clicker.owned[g.key] || 0), 0);
+}
+function formatClickerNumber(v) {
+  if (v >= 1_000_000) return (v / 1_000_000).toFixed(2) + 'M';
+  if (v >= 1000) return (v / 1000).toFixed(1) + 'k';
+  return String(Math.floor(v));
+}
+
+function updateSideGameDisplay() {
+  $('sideGameCount').textContent = formatClickerNumber(state.clicker.cookies);
+  const cps = clickerTotalCps();
+  $('sideGameCps').textContent = cps > 0 ? `+${cps >= 10 ? Math.round(cps) : cps.toFixed(1)}/秒` : '';
 }
 
 function handleSideGameTap() {
-  state.clickerCount++;
-  $('sideGameCount').textContent = String(state.clickerCount);
-  saveClickerCount(state.clickerCount);
-  spawnFloatingPop('+1');
+  const gain = state.clicker.clickPower;
+  state.clicker.cookies += gain;
+  updateSideGameDisplay();
+  saveClickerState();
+  spawnFloatingPop('+' + gain);
+  if (!$('sideGameShop').hidden) renderSideGameShop();
+}
+
+let clickerLoopHandle = null;
+function startClickerLoop() {
+  if (clickerLoopHandle) return;
+  let last = performance.now();
+  clickerLoopHandle = setInterval(() => {
+    const now = performance.now();
+    const dt = (now - last) / 1000;
+    last = now;
+    const cps = clickerTotalCps();
+    if (cps <= 0) return;
+    state.clicker.cookies += cps * dt;
+    if (!$('sideGame').hidden) updateSideGameDisplay();
+    if (!$('sideGameShop').hidden) renderSideGameShop();
+    saveClickerState();
+  }, 500);
+}
+
+function renderSideGameShop() {
+  const list = $('sideGameShopList');
+  const parts = [];
+  for (const g of CLICKER_GENERATORS) {
+    const owned = state.clicker.owned[g.key] || 0;
+    const cost = clickerCost(g, owned);
+    const afford = state.clicker.cookies >= cost;
+    parts.push(`
+      <div class="shop-item${afford ? ' is-affordable' : ''}">
+        <span class="shop-item-icon">${g.icon}</span>
+        <div class="shop-item-body">
+          <div class="shop-item-name">${escapeHtml(g.name)} <span class="shop-item-owned">×${owned}</span></div>
+          <div class="shop-item-desc">${escapeHtml(g.desc)}(${g.cps}/秒)</div>
+        </div>
+        <button type="button" class="shop-item-buy" data-gen="${g.key}"${afford ? '' : ' disabled'}>${formatClickerNumber(cost)}</button>
+      </div>`);
+  }
+  for (const u of CLICKER_UPGRADES) {
+    const owned = !!state.clicker.upgrades[u.key];
+    const afford = state.clicker.cookies >= u.cost;
+    parts.push(`
+      <div class="shop-item${owned ? ' is-maxed' : afford ? ' is-affordable' : ''}">
+        <span class="shop-item-icon">${u.icon}</span>
+        <div class="shop-item-body">
+          <div class="shop-item-name">${escapeHtml(u.name)}</div>
+          <div class="shop-item-desc">${escapeHtml(u.desc)}(タップ+${u.power})</div>
+        </div>
+        <button type="button" class="shop-item-buy" data-upg="${u.key}"${owned || !afford ? ' disabled' : ''}>${owned ? '購入済' : formatClickerNumber(u.cost)}</button>
+      </div>`);
+  }
+  list.innerHTML = parts.join('');
+  list.querySelectorAll('[data-gen]').forEach((btn) => btn.addEventListener('click', () => buyGenerator(btn.dataset.gen)));
+  list.querySelectorAll('[data-upg]').forEach((btn) => btn.addEventListener('click', () => buyClickerUpgrade(btn.dataset.upg)));
+}
+
+function buyGenerator(key) {
+  const g = CLICKER_GENERATORS.find((x) => x.key === key);
+  const owned = state.clicker.owned[key] || 0;
+  const cost = clickerCost(g, owned);
+  if (state.clicker.cookies < cost) return;
+  state.clicker.cookies -= cost;
+  state.clicker.owned[key] = owned + 1;
+  saveClickerState();
+  updateSideGameDisplay();
+  renderSideGameShop();
+}
+function buyClickerUpgrade(key) {
+  const u = CLICKER_UPGRADES.find((x) => x.key === key);
+  if (state.clicker.upgrades[key] || state.clicker.cookies < u.cost) return;
+  state.clicker.cookies -= u.cost;
+  state.clicker.upgrades[key] = true;
+  state.clicker.clickPower += u.power;
+  saveClickerState();
+  updateSideGameDisplay();
+  renderSideGameShop();
+}
+
+function openSideGameShop() {
+  renderSideGameShop();
+  $('sideGameShop').hidden = false;
+}
+function closeSideGameShop() {
+  $('sideGameShop').hidden = true;
 }
 
 function spawnFloatingPop(text) {
@@ -769,9 +891,13 @@ async function init() {
   emotePicker.querySelectorAll('.emote-btn').forEach((btn, i) => {
     btn.addEventListener('click', () => handleSendEmote(EMOTE_OPTIONS[i]));
   });
-  state.clickerCount = loadClickerCount();
-  $('sideGameCount').textContent = String(state.clickerCount);
+  state.clicker = loadClickerState();
+  updateSideGameDisplay();
+  startClickerLoop();
   $('sideGameBtn').addEventListener('click', handleSideGameTap);
+  $('sideGameShopBtn').addEventListener('click', openSideGameShop);
+  $('sideGameShopClose').addEventListener('click', closeSideGameShop);
+  window.addEventListener('beforeunload', saveClickerState);
   $('chatForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     if (!state.room) return;
