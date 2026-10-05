@@ -152,12 +152,34 @@ async function handleJoinRoom() {
   }
 }
 
+// chat/lastEmoteだけが変わった更新ではrender()を呼ばない。render()は
+// #app.innerHTMLを丸ごと作り直すため、相手からのチャット/エモートが届く
+// たびに「質問を入力中」のtextareaなど未保存の入力値が消えてしまっていた。
+// チャット自体はupdateChatUi()が#app外のchat-dockだけを更新するので、
+// ゲーム進行に関係する項目が変わっていない限りrender()は不要。
+// JSON.stringifyはオブジェクトのキー出現順をそのまま使うため、Firestoreの
+// スナップショットがフィールド順を毎回同じ保証をしてくれない(同じデータでも
+// 呼ぶたびに違う文字列になりうる)。再帰的にキーをソートしてから文字列化する。
+function stableStringify(value) {
+  if (Array.isArray(value)) return '[' + value.map(stableStringify).join(',') + ']';
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value).sort();
+    return '{' + keys.map((k) => JSON.stringify(k) + ':' + stableStringify(value[k])).join(',') + '}';
+  }
+  return JSON.stringify(value);
+}
+function roomSignature(room) {
+  const { chat, lastEmote, ...rest } = room;
+  return stableStringify(rest);
+}
+
 function enterRoom(code) {
   state.code = code;
   saveActiveRoom(code);
   state.topicLocal = loadLocalTopic(code);
   state.lastSeenEmoteTs = 0; // 入室直後に古いエモートを再生しないよう、最初のスナップショットで現在値に合わせる
   let firstSnapshot = true;
+  let prevSignature = null;
   if (state.unsubscribe) state.unsubscribe();
   state.unsubscribe = subscribeToRoom(code, (room) => {
     if (!room) {
@@ -176,7 +198,9 @@ function enterRoom(code) {
       state.genreHintLocal = '';
     }
     handleHostReactiveFinalize(room);
-    render();
+    const sig = roomSignature(room);
+    if (sig !== prevSignature) render();
+    prevSignature = sig;
     updateChatUi(room);
     if (firstSnapshot) {
       state.lastSeenEmoteTs = room.lastEmote?.ts || 0;
